@@ -1,4 +1,5 @@
-// src/index.js
+// QueueStorm Investigator — production orchestrator
+
 require('dotenv').config();
 
 const express = require('express');
@@ -6,8 +7,12 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
 
+const { validateRequestBody, detectLanguage } = require('./security');
 const { preFilter } = require('./preFilter');
-const { callLLM, maskApiKey, PRIORITY } = require('./llmCaller');
+const { matchTransactions } = require('./transactionMatcher');
+const { buildEvidence } = require('./evidenceEngine');
+const { applyRules } = require('./rules');
+const { callLLM, maskApiKey, PRIORITY, getProviderStats } = require('./llmCaller');
 const { geminiRotator, groqRotator, openrouterRotator } = require('./keyRotator');
 const { buildSystemPrompt, buildUserPrompt } = require('./prompt');
 const { parseJSON, validate } = require('./validator');
@@ -16,7 +21,6 @@ const { logTicket, hashComplaint } = require('./logger');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ── Middleware ────────────────────────────────────────────────
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
@@ -34,16 +38,20 @@ app.use(express.static(path.join(__dirname, '../public')));
 
 const limiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 120,
+  max: parseInt(process.env.RATE_LIMIT_MAX || '120', 10),
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests, please slow down.' }
 });
 app.use(limiter);
 
-// ── Health ────────────────────────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    providers: PRIORITY,
+    uptime_seconds: Math.floor(process.uptime())
+  });
 });
 
 const ROTATORS = { gemini: geminiRotator, groq: groqRotator, openrouter: openrouterRotator };
@@ -64,6 +72,7 @@ app.get('/api-key', (req, res) => {
 });
 
 app.get('/api/agents', (req, res) => {
+  const stats = getProviderStats();
   const agents = PRIORITY.map((provider, index) => {
     const rotator = ROTATORS[provider];
     const configured = Boolean(rotator?.hasKeys());
@@ -72,7 +81,8 @@ app.get('/api/agents', (req, res) => {
       priority: index + 1,
       configured,
       masked_api_key: configured ? maskApiKey(rotator.keys[0]) : null,
-      status: configured ? 'ready' : 'not_configured'
+      status: configured ? 'ready' : 'not_configured',
+      stats: stats[provider] || null
     };
   });
   const primary = agents.find((a) => a.configured) || null;
@@ -83,6 +93,7 @@ app.get('/api/agents', (req, res) => {
 async function analyzeOneTicket(body) {
   const startMs = Date.now();
   const { ticket_id, complaint } = body;
+  const language = body.language || detectLanguage(complaint);
 
   if (!ticket_id || typeof ticket_id !== 'string' || ticket_id.trim() === '') {
     return { error: true, status: 400, data: { error: 'Missing required field: ticket_id' } };
@@ -100,7 +111,19 @@ async function analyzeOneTicket(body) {
 
   // Build prompts
   const systemPrompt = buildSystemPrompt();
-  const userPrompt = buildUserPrompt(body, preFilterResult);
+  const userPrompt = buildUserPrompt(body, {
+    preFilterResult,
+    matchResult,
+    evidenceResult,
+    rulesResult,
+    language
+  });
+
+  let raw;
+  let provider;
+  let maskedApiKey;
+  let fallbackUsed = false;
+  let llmLatencyMs = 0;
 
   // Call LLM with fallback
   let raw, provider, maskedApiKey;
@@ -109,6 +132,8 @@ async function analyzeOneTicket(body) {
     raw = result.raw;
     provider = result.provider;
     maskedApiKey = result.masked_api_key;
+    fallbackUsed = result.fallback_used || false;
+    llmLatencyMs = result.latency_ms || 0;
   } catch (err) {
     console.error(`[LLM] All providers failed for ${ticket_id}:`, err.message);
     const detail = err.message || 'Unknown error';
@@ -139,13 +164,17 @@ async function analyzeOneTicket(body) {
   const { data: validated, errors: validationErrors } = validate(parsed, ticket_id);
 
   const latencyMs = Date.now() - startMs;
-  const safetyPassed = validationErrors.filter(e => e.includes('forbidden phrase')).length === 0;
+  const safetyPassed = !validationErrors.some((e) =>
+    e.includes('forbidden phrase') || e.includes('credential leak')
+  );
 
   // Async log to Supabase (non-blocking)
   logTicket({
     ticketId: ticket_id,
     provider,
     latencyMs,
+    llmLatencyMs,
+    fallbackUsed,
     caseType: validated.case_type,
     evidenceVerdict: validated.evidence_verdict,
     safetyPassed,
@@ -231,21 +260,30 @@ app.post('/analyze-batch', async (req, res) => {
   });
 });
 
-// ── 404 handler ───────────────────────────────────────────────
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
 
-// ── Error handler ─────────────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('[Unhandled]', err.message);
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// ── Start ─────────────────────────────────────────────────────
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`QueueStorm Investigator running on port ${PORT}`);
   console.log(`Health: http://localhost:${PORT}/health`);
 });
+
+function gracefulShutdown(signal) {
+  console.log(`[Shutdown] Received ${signal}, closing server…`);
+  server.close(() => {
+    console.log('[Shutdown] Server closed');
+    process.exit(0);
+  });
+  setTimeout(() => process.exit(1), 10000);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 module.exports = app;
