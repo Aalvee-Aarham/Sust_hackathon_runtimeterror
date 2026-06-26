@@ -1,5 +1,4 @@
-// src/logger.js
-// Async Supabase logger — never blocks the response
+// Async Supabase logger — never blocks API response
 
 const { createClient } = require('@supabase/supabase-js');
 const crypto = require('crypto');
@@ -17,30 +16,50 @@ function getClient() {
   return supabase;
 }
 
-async function ensureTable(client) {
-  // Create table if not exists via RPC or just try insert and ignore schema errors
-  // We'll attempt the upsert and let Supabase handle it
-}
-
-async function logTicket({ ticketId, provider, latencyMs, caseType, evidenceVerdict, safetyPassed, confidence, complaintHash, validationErrors }) {
+async function logTicket({
+  ticketId,
+  provider,
+  latencyMs,
+  llmLatencyMs,
+  fallbackUsed,
+  caseType,
+  evidenceVerdict,
+  safetyPassed,
+  confidence,
+  complaintHash,
+  validationErrors,
+  reasonCodes,
+  matcherScore,
+  securityFlags,
+  promptInjection,
+  department,
+  severity
+}) {
   const client = getClient();
-  if (!client) return; // Supabase not configured, skip silently
+  if (!client) return;
 
   try {
     await client.from('ticket_logs').insert({
       ticket_id: ticketId,
       api_used: provider,
       latency_ms: latencyMs,
+      llm_latency_ms: llmLatencyMs ?? null,
+      fallback_used: fallbackUsed ?? false,
       case_type: caseType,
       evidence_verdict: evidenceVerdict,
       safety_passed: safetyPassed,
       confidence: confidence,
       raw_complaint_hash: complaintHash,
       validation_errors: validationErrors,
+      reason_codes: reasonCodes ?? null,
+      matcher_score: matcherScore ?? null,
+      security_flags: securityFlags ?? null,
+      prompt_injection: promptInjection ?? false,
+      department: department ?? null,
+      severity: severity ?? null,
       timestamp: new Date().toISOString()
     });
   } catch (err) {
-    // Non-blocking: log to console only
     console.error('[Logger] Supabase insert failed:', err.message);
   }
 }

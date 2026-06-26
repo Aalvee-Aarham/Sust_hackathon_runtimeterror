@@ -1,4 +1,5 @@
-// src/index.js
+// QueueStorm Investigator — production orchestrator
+
 require('dotenv').config();
 
 const express = require('express');
@@ -6,9 +7,12 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
 
+const { validateRequestBody, detectLanguage } = require('./security');
 const { preFilter } = require('./preFilter');
-const { findBestTransaction } = require('./transactionMatcher');
-const { callLLM, maskApiKey, PRIORITY } = require('./llmCaller');
+const { matchTransactions } = require('./transactionMatcher');
+const { buildEvidence } = require('./evidenceEngine');
+const { applyRules } = require('./rules');
+const { callLLM, maskApiKey, PRIORITY, getProviderStats } = require('./llmCaller');
 const { geminiRotator, groqRotator, openrouterRotator } = require('./keyRotator');
 const { buildSystemPrompt, buildUserPrompt } = require('./prompt');
 const { parseJSON, validate } = require('./validator');
@@ -17,7 +21,6 @@ const { logTicket, hashComplaint } = require('./logger');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ── Middleware ────────────────────────────────────────────────
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
@@ -35,16 +38,20 @@ app.use(express.static(path.join(__dirname, '../public')));
 
 const limiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 120,
+  max: parseInt(process.env.RATE_LIMIT_MAX || '120', 10),
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests, please slow down.' }
 });
 app.use(limiter);
 
-// ── Health ────────────────────────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    providers: PRIORITY,
+    uptime_seconds: Math.floor(process.uptime())
+  });
 });
 
 const ROTATORS = { gemini: geminiRotator, groq: groqRotator, openrouter: openrouterRotator };
@@ -65,6 +72,7 @@ app.get('/api-key', (req, res) => {
 });
 
 app.get('/api/agents', (req, res) => {
+  const stats = getProviderStats();
   const agents = PRIORITY.map((provider, index) => {
     const rotator = ROTATORS[provider];
     const configured = Boolean(rotator?.hasKeys());
@@ -73,63 +81,64 @@ app.get('/api/agents', (req, res) => {
       priority: index + 1,
       configured,
       masked_api_key: configured ? maskApiKey(rotator.keys[0]) : null,
-      status: configured ? 'ready' : 'not_configured'
+      status: configured ? 'ready' : 'not_configured',
+      stats: stats[provider] || null
     };
   });
   const primary = agents.find((a) => a.configured) || null;
   res.json({ priority: PRIORITY, primary, agents });
 });
 
-// ── Main endpoint ─────────────────────────────────────────────
 app.post('/analyze-ticket', async (req, res) => {
   const startMs = Date.now();
 
-  // 1. Input validation
-  const body = req.body;
-  if (!body || typeof body !== 'object') {
-    return res.status(400).json({ error: 'Invalid JSON body' });
+  const inputCheck = validateRequestBody(req.body);
+  if (!inputCheck.valid) {
+    const status = inputCheck.errors.some((e) => e.includes('complaint')) ? 422 : 400;
+    return res.status(status).json({ error: inputCheck.errors[0], errors: inputCheck.errors });
   }
 
+  const body = inputCheck.sanitized;
   const { ticket_id, complaint } = body;
+  const language = body.language || detectLanguage(complaint);
 
-  if (!ticket_id || typeof ticket_id !== 'string' || ticket_id.trim() === '') {
-    return res.status(400).json({ error: 'Missing required field: ticket_id' });
-  }
-
-  if (!complaint || typeof complaint !== 'string' || complaint.trim() === '') {
-    return res.status(422).json({ error: 'Missing or empty complaint field' });
-  }
-
-  // 2. Pre-filter
   const preFilterResult = preFilter(body);
 
-  const matchedTransaction = findBestTransaction(
-    body.transaction_history || [],
-    complaint
-  );
-
-  // Log injection attempts separately (flagged=true)
   if (preFilterResult?.flagged) {
     console.warn(`[Security] Injection attempt detected in ticket ${ticket_id}`);
-    // Still process but LLM will ignore the instructions
   }
 
-  // 3. Build prompts
-  const systemPrompt = buildSystemPrompt();
-
-  const userPrompt = buildUserPrompt(
-    body,
+  const matchResult = matchTransactions(body.transaction_history || [], complaint);
+  const evidenceResult = buildEvidence(matchResult, complaint, body.transaction_history || []);
+  const rulesResult = applyRules({
     preFilterResult,
-    matchedTransaction
-  );
+    matchResult,
+    evidenceResult,
+    complaint
+  });
 
-  // 4. Call LLM with fallback
-  let raw, provider, maskedApiKey;
+  const systemPrompt = buildSystemPrompt();
+  const userPrompt = buildUserPrompt(body, {
+    preFilterResult,
+    matchResult,
+    evidenceResult,
+    rulesResult,
+    language
+  });
+
+  let raw;
+  let provider;
+  let maskedApiKey;
+  let fallbackUsed = false;
+  let llmLatencyMs = 0;
+
   try {
     const result = await callLLM(systemPrompt, userPrompt);
     raw = result.raw;
     provider = result.provider;
     maskedApiKey = result.masked_api_key;
+    fallbackUsed = result.fallback_used || false;
+    llmLatencyMs = result.latency_ms || 0;
   } catch (err) {
     console.error(`[LLM] All providers failed for ${ticket_id}:`, err.message);
     const detail = err.message || 'Unknown error';
@@ -142,60 +151,93 @@ app.post('/analyze-ticket', async (req, res) => {
     });
   }
 
-  // 5. Parse JSON
   let parsed;
   try {
     parsed = parseJSON(raw);
   } catch (err) {
-    console.error(`[Parse] JSON parse failed for ${ticket_id}:`, err.message, '\nRaw:', raw?.substring(0, 200));
-    return res.status(500).json({ error: 'Failed to parse LLM response. Please retry.' });
+    console.error(`[Parse] JSON parse failed for ${ticket_id}:`, err.message);
+    parsed = {
+      agent_summary: `Ticket ${ticket_id} analyzed. Evidence: ${evidenceResult.evidence_verdict}. Case: ${rulesResult.case_type}.`,
+      recommended_next_action: rulesResult.human_review_required
+        ? 'Escalate to human agent for manual review.'
+        : 'Proceed with standard resolution workflow.',
+      customer_reply: null
+    };
   }
 
-  // 6. Validate and sanitize
-  const { data: validated, errors: validationErrors } = validate(parsed, ticket_id);
+  const { data: validated, errors: validationErrors } = validate(parsed, ticket_id, {
+    evidenceResult,
+    rulesResult,
+    preFilterResult,
+    transactionHistory: body.transaction_history || [],
+    language
+  });
 
   const latencyMs = Date.now() - startMs;
-  const safetyPassed = validationErrors.filter(e => e.includes('forbidden phrase')).length === 0;
+  const safetyPassed = !validationErrors.some((e) =>
+    e.includes('forbidden phrase') || e.includes('credential leak')
+  );
 
-  // 7. Async log to Supabase (non-blocking)
   logTicket({
     ticketId: ticket_id,
     provider,
     latencyMs,
+    llmLatencyMs,
+    fallbackUsed,
     caseType: validated.case_type,
     evidenceVerdict: validated.evidence_verdict,
     safetyPassed,
     confidence: validated.confidence,
     complaintHash: hashComplaint(complaint),
-    validationErrors: validationErrors.length > 0 ? validationErrors : null
-  }).catch(() => {}); // truly non-blocking
+    validationErrors: validationErrors.length > 0 ? validationErrors : null,
+    reasonCodes: validated.reason_codes,
+    matcherScore: matchResult.best?.score ?? null,
+    securityFlags: preFilterResult?.security_flag || null,
+    promptInjection: Boolean(preFilterResult?.flagged),
+    department: validated.department,
+    severity: validated.severity
+  }).catch(() => {});
 
-  console.log(`[OK] ${ticket_id} | ${validated.case_type} | ${validated.evidence_verdict} | ${provider} | ${latencyMs}ms`);
+  console.log(
+    `[OK] ${ticket_id} | ${validated.case_type} | ${validated.evidence_verdict} | ${provider} | ${latencyMs}ms`
+  );
 
   return res.status(200).json({
     ...validated,
     _meta: {
       provider,
-      masked_api_key: maskedApiKey
+      masked_api_key: maskedApiKey,
+      fallback_used: fallbackUsed,
+      latency_ms: latencyMs,
+      llm_latency_ms: llmLatencyMs
     }
   });
 });
 
-// ── 404 handler ───────────────────────────────────────────────
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
 
-// ── Error handler ─────────────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('[Unhandled]', err.message);
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// ── Start ─────────────────────────────────────────────────────
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`QueueStorm Investigator running on port ${PORT}`);
   console.log(`Health: http://localhost:${PORT}/health`);
 });
+
+function gracefulShutdown(signal) {
+  console.log(`[Shutdown] Received ${signal}, closing server…`);
+  server.close(() => {
+    console.log('[Shutdown] Server closed');
+    process.exit(0);
+  });
+  setTimeout(() => process.exit(1), 10000);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 module.exports = app;
