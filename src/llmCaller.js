@@ -145,12 +145,12 @@ async function callWithKeyRotation(rotator, providerName, callFn) {
 async function callGemini(systemPrompt, userPrompt) {
   const model = MODELS.gemini;
   return callWithKeyRotation(geminiRotator, 'gemini', async (key) => {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`;
     const res = await axios.post(url, {
       contents: [{ parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }],
       generationConfig: {
         temperature: 0.1,
-        maxOutputTokens: 800,
+        maxOutputTokens: 8192,
         responseMimeType: 'application/json'
       }
     }, { timeout: TIMEOUT });
@@ -172,7 +172,7 @@ async function callGroq(systemPrompt, userPrompt) {
           { role: 'user', content: userPrompt }
         ],
         temperature: 0.1,
-        max_tokens: 800,
+        max_tokens: 8192,
         response_format: { type: 'json_object' }
       },
       {
@@ -192,13 +192,13 @@ async function callOpenRouter(systemPrompt, userPrompt) {
     const res = await axios.post(
       'https://openrouter.ai/api/v1/chat/completions',
       {
-        model: MODELS.openrouter,
+        model: 'google/gemini-3.5-flash',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
         ],
         temperature: 0.1,
-        max_tokens: 800,
+        max_tokens: 4000,
         response_format: { type: 'json_object' }
       },
       {

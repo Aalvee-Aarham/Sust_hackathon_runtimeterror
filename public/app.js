@@ -3,6 +3,8 @@
 let transactions = [];
 let lastJsonResponse = null;
 let agentConfig = null;
+let jsonMode = 'single'; // 'single' or 'batch'
+let lastBatchResponse = null;
 
 const EMPTY_TXN_MESSAGE = 'No transaction history added yet. Click "+ Add Transaction" or load a preset.';
 
@@ -179,8 +181,21 @@ function cacheElements() {
     jsonModal: document.getElementById('json-modal'),
     jsonForm: document.getElementById('json-form'),
     jsonPayloadTextarea: document.getElementById('json-payload'),
+    jsonPayloadLabel: document.getElementById('json-payload-label'),
     jsonErrorEl: document.getElementById('json-error'),
     jsonCaseSelect: document.getElementById('json-case-select'),
+    jsonSampleGroup: document.getElementById('json-sample-group'),
+    jsonBatchSampleGroup: document.getElementById('json-batch-sample-group'),
+    jsonBatchHint: document.getElementById('json-batch-hint'),
+    modeSingle: document.getElementById('mode-single'),
+    modeBatch: document.getElementById('mode-batch'),
+    btnJsonSubmitText: document.getElementById('btn-json-submit-text'),
+    btnJsonSpinner: document.getElementById('btn-json-spinner'),
+    batchResultsSection: document.getElementById('batch-results-section'),
+    batchResultsSummary: document.getElementById('batch-results-summary'),
+    batchProgressBar: document.getElementById('batch-progress-bar'),
+    batchProgressLabel: document.getElementById('batch-progress-label'),
+    batchResultsList: document.getElementById('batch-results-list'),
     btnAnalyze: document.getElementById('btn-analyze'),
     btnText: document.getElementById('btn-text'),
     btnSpinner: document.getElementById('btn-spinner'),
@@ -324,6 +339,19 @@ function bindEvents() {
   document.getElementById('drawer-trigger')?.addEventListener('click', toggleDrawer);
   document.getElementById('preset-clear')?.addEventListener('click', clearAll);
 
+  // Mode toggle
+  els.modeSingle?.addEventListener('click', () => setJsonMode('single'));
+  els.modeBatch?.addEventListener('click', () => setJsonMode('batch'));
+
+  // Batch sample loaders
+  document.getElementById('btn-load-batch-3')?.addEventListener('click', () => loadBatchSamples(3));
+  document.getElementById('btn-load-batch-5')?.addEventListener('click', () => loadBatchSamples(5));
+  document.getElementById('btn-load-batch-all')?.addEventListener('click', () => loadBatchSamples(10));
+
+  // Batch results actions
+  document.getElementById('btn-copy-batch-json')?.addEventListener('click', copyBatchJson);
+  document.getElementById('btn-close-batch')?.addEventListener('click', closeBatchResults);
+
   document.querySelectorAll('[data-preset]').forEach((btn) => {
     btn.addEventListener('click', () => loadPreset(btn.dataset.preset));
   });
@@ -463,7 +491,12 @@ function openJsonModal() {
   clearJsonError();
   els.jsonCaseSelect.value = '';
   if (!els.jsonPayloadTextarea.value.trim()) {
-    els.jsonPayloadTextarea.value = JSON.stringify(SAMPLE_CASES['SAMPLE-01'], null, 2);
+    if (jsonMode === 'batch') {
+      const firstThree = Object.values(SAMPLE_CASES).slice(0, 3);
+      els.jsonPayloadTextarea.value = JSON.stringify(firstThree, null, 2);
+    } else {
+      els.jsonPayloadTextarea.value = JSON.stringify(SAMPLE_CASES['SAMPLE-01'], null, 2);
+    }
   }
   els.jsonModal.classList.remove('hidden');
 }
@@ -490,6 +523,37 @@ function loadJsonSample(caseId) {
   showToast(`Loaded ${caseId} into JSON editor.`, 'info', 2500);
 }
 
+function setJsonMode(mode) {
+  jsonMode = mode;
+  els.modeSingle.classList.toggle('mode-btn-active', mode === 'single');
+  els.modeBatch.classList.toggle('mode-btn-active', mode === 'batch');
+
+  // Toggle visibility of single vs batch UI
+  if (mode === 'batch') {
+    els.jsonSampleGroup.classList.add('hidden');
+    els.jsonBatchSampleGroup.classList.remove('hidden');
+    els.jsonBatchHint.classList.remove('hidden');
+    els.jsonPayloadLabel.innerText = 'JSON Array of Tickets (POST body for /analyze-batch)';
+    els.btnJsonSubmitText.innerText = 'Analyze Batch';
+    els.jsonPayloadTextarea.placeholder = '[{"ticket_id": "TKT-001", "complaint": "..."}, {"ticket_id": "TKT-002", ...}]';
+  } else {
+    els.jsonSampleGroup.classList.remove('hidden');
+    els.jsonBatchSampleGroup.classList.add('hidden');
+    els.jsonBatchHint.classList.add('hidden');
+    els.jsonPayloadLabel.innerText = 'Raw JSON (POST body for /analyze-ticket)';
+    els.btnJsonSubmitText.innerText = 'Analyze JSON';
+    els.jsonPayloadTextarea.placeholder = '{"ticket_id": "TKT-001", "complaint": "..."}';
+  }
+}
+
+function loadBatchSamples(count) {
+  clearJsonError();
+  const keys = Object.keys(SAMPLE_CASES).slice(0, count);
+  const cases = keys.map(k => SAMPLE_CASES[k]);
+  els.jsonPayloadTextarea.value = JSON.stringify(cases, null, 2);
+  showToast(`Loaded ${count} sample tickets into batch editor.`, 'info', 2500);
+}
+
 async function submitJsonPayload(event) {
   event.preventDefault();
   clearJsonError();
@@ -503,6 +567,14 @@ async function submitJsonPayload(event) {
     return;
   }
 
+  if (jsonMode === 'batch') {
+    await submitBatchPayload(payload);
+  } else {
+    await submitSinglePayload(payload);
+  }
+}
+
+async function submitSinglePayload(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     showJsonError('Payload must be a JSON object.');
     showToast('Payload must be a JSON object.', 'error');
@@ -523,6 +595,259 @@ async function submitJsonPayload(event) {
 
   closeJsonModal();
   await analyzeTicket(payload, 'Analyzing JSON payload…');
+}
+
+async function submitBatchPayload(payload) {
+  // Normalize: accept array or {tickets: [...]}
+  let tickets;
+  if (Array.isArray(payload)) {
+    tickets = payload;
+  } else if (payload && typeof payload === 'object' && Array.isArray(payload.tickets)) {
+    tickets = payload.tickets;
+  } else {
+    showJsonError('Batch payload must be a JSON array or an object with a "tickets" array.');
+    showToast('Invalid batch format.', 'error');
+    return;
+  }
+
+  if (tickets.length === 0) {
+    showJsonError('Tickets array is empty.');
+    showToast('No tickets to process.', 'error');
+    return;
+  }
+
+  if (tickets.length > 20) {
+    showJsonError('Maximum 20 tickets per batch.');
+    showToast('Too many tickets (max 20).', 'error');
+    return;
+  }
+
+  // Validate each ticket has minimum fields
+  for (let i = 0; i < tickets.length; i++) {
+    const t = tickets[i];
+    if (!t.ticket_id || !t.complaint) {
+      showJsonError(`Ticket at index ${i} is missing ticket_id or complaint.`);
+      showToast(`Ticket #${i + 1} is missing required fields.`, 'error');
+      return;
+    }
+  }
+
+  closeJsonModal();
+
+  // Show batch results section and set up progress
+  els.batchResultsSection.classList.remove('hidden');
+  els.batchResultsList.innerHTML = '';
+  els.batchProgressBar.style.width = '0%';
+  els.batchProgressLabel.innerText = `0 / ${tickets.length} tickets`;
+  els.batchResultsSummary.innerText = `Processing ${tickets.length} ticket${tickets.length > 1 ? 's' : ''}…`;
+  lastBatchResponse = null;
+
+  // Scroll to batch results
+  els.batchResultsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  // Create placeholder cards for all tickets
+  tickets.forEach((ticket, i) => {
+    const card = createBatchPlaceholderCard(i, ticket.ticket_id);
+    els.batchResultsList.appendChild(card);
+  });
+
+  showLoading('Processing batch…', `Analyzing ticket 1 of ${tickets.length}…`);
+  const primaryAgent = agentConfig?.primary?.provider;
+  if (primaryAgent) highlightActiveAgent(primaryAgent);
+
+  const allResults = [];
+  let successCount = 0;
+  let failCount = 0;
+
+  for (let i = 0; i < tickets.length; i++) {
+    const ticket = tickets[i];
+    setLoadingSubtext(`Analyzing ticket ${i + 1} of ${tickets.length}: ${ticket.ticket_id}…`);
+    showToast(`Processing ${ticket.ticket_id} (${i + 1}/${tickets.length})…`, 'info', 2500);
+
+    // Mark current card as processing
+    const cardEl = els.batchResultsList.children[i];
+    if (cardEl) {
+      cardEl.classList.add('batch-processing');
+    }
+
+    try {
+      const response = await fetch('/analyze-ticket', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(ticket)
+      });
+
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        throw new Error('Server returned a non-JSON response.');
+      }
+
+      if (!response.ok) {
+        const detail = data.detail ? ` — ${data.detail}` : '';
+        throw new Error((data.error || `Server error (${response.status}).`) + detail);
+      }
+
+      allResults.push({ index: i, ticket_id: ticket.ticket_id, success: true, result: data });
+      successCount++;
+      updateBatchCard(cardEl, i, ticket.ticket_id, true, data);
+
+      const provider = data._meta?.provider || 'unknown';
+      if (provider) highlightActiveAgent(provider);
+    } catch (err) {
+      allResults.push({ index: i, ticket_id: ticket.ticket_id, success: false, error: err.message });
+      failCount++;
+      updateBatchCard(cardEl, i, ticket.ticket_id, false, null, err.message);
+    }
+
+    // Update progress
+    const progressPct = ((i + 1) / tickets.length) * 100;
+    els.batchProgressBar.style.width = `${progressPct}%`;
+    els.batchProgressLabel.innerText = `${i + 1} / ${tickets.length} tickets`;
+  }
+
+  hideLoading();
+
+  lastBatchResponse = allResults;
+  els.batchResultsSummary.innerText = `✅ ${successCount} succeeded, ${failCount > 0 ? `❌ ${failCount} failed` : 'no failures'} — ${tickets.length} total tickets`;
+  showToast(`Batch complete: ${successCount}/${tickets.length} succeeded.`, successCount === tickets.length ? 'success' : 'error', 6000);
+
+  // Also render the last successful result in the main results panel
+  const lastSuccess = allResults.filter(r => r.success).pop();
+  if (lastSuccess) {
+    renderResults(lastSuccess.result);
+    updateServiceInfo(lastSuccess.result._meta);
+  }
+}
+
+function createBatchPlaceholderCard(index, ticketId) {
+  const card = document.createElement('div');
+  card.className = 'batch-result-card';
+  card.style.animationDelay = `${index * 50}ms`;
+  card.innerHTML = `
+    <div class="batch-result-card-header">
+      <div class="batch-card-left">
+        <div class="batch-card-index">${index + 1}</div>
+        <div class="batch-card-title">${escapeHTML(ticketId || 'Ticket')}</div>
+      </div>
+      <div class="batch-card-right">
+        <span class="batch-verdict-chip batch-verdict-insufficient">Pending</span>
+        <span class="batch-card-toggle">▼</span>
+      </div>
+    </div>
+    <div class="batch-card-body">
+      <div class="batch-card-summary" style="text-align:center;color:var(--text-muted);">Waiting to process…</div>
+    </div>
+  `;
+  return card;
+}
+
+function updateBatchCard(cardEl, index, ticketId, success, data, errorMsg) {
+  if (!cardEl) return;
+
+  cardEl.classList.remove('batch-processing');
+  cardEl.className = `batch-result-card ${success ? 'batch-success' : 'batch-error'}`;
+  cardEl.style.animationDelay = '0ms';
+
+  if (success && data) {
+    const verdict = (data.evidence_verdict || 'insufficient_data').toLowerCase();
+    const verdictClass = verdict === 'consistent' ? 'batch-verdict-consistent'
+      : verdict === 'inconsistent' ? 'batch-verdict-inconsistent'
+      : 'batch-verdict-insufficient';
+    const verdictLabel = verdict === 'consistent' ? 'Consistent'
+      : verdict === 'inconsistent' ? 'Inconsistent'
+      : 'Insufficient';
+
+    const confPct = Math.round((data.confidence || 0) * 100);
+    const outputCopy = { ...data };
+    delete outputCopy._meta;
+
+    cardEl.innerHTML = `
+      <div class="batch-result-card-header" onclick="toggleBatchCard(this)">
+        <div class="batch-card-left">
+          <div class="batch-card-index">${index + 1}</div>
+          <div class="batch-card-title">${escapeHTML(ticketId)} — ${escapeHTML(formatString(data.case_type))}</div>
+        </div>
+        <div class="batch-card-right">
+          <span class="batch-verdict-chip ${verdictClass}">${verdictLabel}</span>
+          <span class="batch-card-toggle">▼</span>
+        </div>
+      </div>
+      <div class="batch-card-body">
+        <div class="batch-card-meta">
+          <div class="batch-meta-item">
+            <span class="batch-meta-label">Case Type</span>
+            <span class="batch-meta-value">${escapeHTML(formatString(data.case_type))}</span>
+          </div>
+          <div class="batch-meta-item">
+            <span class="batch-meta-label">Severity</span>
+            <span class="batch-meta-value">${escapeHTML(formatString(data.severity))}</span>
+          </div>
+          <div class="batch-meta-item">
+            <span class="batch-meta-label">Department</span>
+            <span class="batch-meta-value">${escapeHTML(formatString(data.department))}</span>
+          </div>
+          <div class="batch-meta-item">
+            <span class="batch-meta-label">Confidence</span>
+            <span class="batch-meta-value">${confPct}%</span>
+          </div>
+        </div>
+        <div class="batch-card-summary">${escapeHTML(data.agent_summary || 'No summary provided.')}</div>
+        <button type="button" class="batch-card-json-toggle" onclick="toggleBatchJson(this, event)">Show Raw JSON</button>
+        <div class="batch-card-json">
+          <textarea readonly>${JSON.stringify(outputCopy, null, 2)}</textarea>
+        </div>
+      </div>
+    `;
+  } else {
+    cardEl.innerHTML = `
+      <div class="batch-result-card-header" onclick="toggleBatchCard(this)">
+        <div class="batch-card-left">
+          <div class="batch-card-index">${index + 1}</div>
+          <div class="batch-card-title">${escapeHTML(ticketId)} — Failed</div>
+        </div>
+        <div class="batch-card-right">
+          <span class="batch-verdict-chip batch-verdict-error">Error</span>
+          <span class="batch-card-toggle">▼</span>
+        </div>
+      </div>
+      <div class="batch-card-body">
+        <div class="batch-card-error-msg">${escapeHTML(errorMsg || 'Unknown error occurred.')}</div>
+      </div>
+    `;
+  }
+}
+
+function toggleBatchCard(headerEl) {
+  const card = headerEl.closest('.batch-result-card');
+  const body = card.querySelector('.batch-card-body');
+  const toggle = card.querySelector('.batch-card-toggle');
+  body.classList.toggle('expanded');
+  toggle.classList.toggle('expanded');
+}
+
+function toggleBatchJson(btnEl, event) {
+  event.stopPropagation();
+  const jsonDiv = btnEl.nextElementSibling;
+  jsonDiv.classList.toggle('visible');
+  btnEl.innerText = jsonDiv.classList.contains('visible') ? 'Hide Raw JSON' : 'Show Raw JSON';
+}
+
+function copyBatchJson() {
+  if (!lastBatchResponse) {
+    showToast('No batch results to copy.', 'error');
+    return;
+  }
+  const text = JSON.stringify(lastBatchResponse, null, 2);
+  navigator.clipboard.writeText(text)
+    .then(() => showToast('Batch JSON copied!', 'success', 2500))
+    .catch((err) => handleError('Failed to copy batch JSON.', err));
+}
+
+function closeBatchResults() {
+  els.batchResultsSection.classList.add('hidden');
+  lastBatchResponse = null;
 }
 
 function loadPreset(key) {

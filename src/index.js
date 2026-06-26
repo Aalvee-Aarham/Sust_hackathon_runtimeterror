@@ -89,34 +89,27 @@ app.get('/api/agents', (req, res) => {
   res.json({ priority: PRIORITY, primary, agents });
 });
 
-app.post('/analyze-ticket', async (req, res) => {
+// ── Shared analysis logic ─────────────────────────────────────
+async function analyzeOneTicket(body) {
   const startMs = Date.now();
-
-  const inputCheck = validateRequestBody(req.body);
-  if (!inputCheck.valid) {
-    const status = inputCheck.errors.some((e) => e.includes('complaint')) ? 422 : 400;
-    return res.status(status).json({ error: inputCheck.errors[0], errors: inputCheck.errors });
-  }
-
-  const body = inputCheck.sanitized;
   const { ticket_id, complaint } = body;
   const language = body.language || detectLanguage(complaint);
 
-  const preFilterResult = preFilter(body);
+  if (!ticket_id || typeof ticket_id !== 'string' || ticket_id.trim() === '') {
+    return { error: true, status: 400, data: { error: 'Missing required field: ticket_id' } };
+  }
 
+  if (!complaint || typeof complaint !== 'string' || complaint.trim() === '') {
+    return { error: true, status: 422, data: { error: 'Missing or empty complaint field', ticket_id } };
+  }
+
+  // Pre-filter
+  const preFilterResult = preFilter(body);
   if (preFilterResult?.flagged) {
     console.warn(`[Security] Injection attempt detected in ticket ${ticket_id}`);
   }
 
-  const matchResult = matchTransactions(body.transaction_history || [], complaint);
-  const evidenceResult = buildEvidence(matchResult, complaint, body.transaction_history || []);
-  const rulesResult = applyRules({
-    preFilterResult,
-    matchResult,
-    evidenceResult,
-    complaint
-  });
-
+  // Build prompts
   const systemPrompt = buildSystemPrompt();
   const userPrompt = buildUserPrompt(body, {
     preFilterResult,
@@ -132,6 +125,8 @@ app.post('/analyze-ticket', async (req, res) => {
   let fallbackUsed = false;
   let llmLatencyMs = 0;
 
+  // Call LLM with fallback
+  let raw, provider, maskedApiKey;
   try {
     const result = await callLLM(systemPrompt, userPrompt);
     raw = result.raw;
@@ -143,41 +138,37 @@ app.post('/analyze-ticket', async (req, res) => {
     console.error(`[LLM] All providers failed for ${ticket_id}:`, err.message);
     const detail = err.message || 'Unknown error';
     const isRateLimit = /429|rate.?limit|quota|RESOURCE_EXHAUSTED/i.test(detail);
-    return res.status(isRateLimit ? 429 : 503).json({
-      error: isRateLimit
-        ? 'LLM rate limit reached on all keys. Wait a minute or add Groq/OpenRouter keys in .env.'
-        : 'LLM service unavailable. Please retry.',
-      detail
-    });
+    return {
+      error: true,
+      status: isRateLimit ? 429 : 503,
+      data: {
+        error: isRateLimit
+          ? 'LLM rate limit reached on all keys. Wait a minute or add Groq/OpenRouter keys in .env.'
+          : 'LLM service unavailable. Please retry.',
+        detail,
+        ticket_id
+      }
+    };
   }
 
+  // Parse JSON
   let parsed;
   try {
     parsed = parseJSON(raw);
   } catch (err) {
-    console.error(`[Parse] JSON parse failed for ${ticket_id}:`, err.message);
-    parsed = {
-      agent_summary: `Ticket ${ticket_id} analyzed. Evidence: ${evidenceResult.evidence_verdict}. Case: ${rulesResult.case_type}.`,
-      recommended_next_action: rulesResult.human_review_required
-        ? 'Escalate to human agent for manual review.'
-        : 'Proceed with standard resolution workflow.',
-      customer_reply: null
-    };
+    console.error(`[Parse] JSON parse failed for ${ticket_id}:`, err.message, '\nRaw:', raw?.substring(0, 200));
+    return { error: true, status: 500, data: { error: 'Failed to parse LLM response. Please retry.', ticket_id } };
   }
 
-  const { data: validated, errors: validationErrors } = validate(parsed, ticket_id, {
-    evidenceResult,
-    rulesResult,
-    preFilterResult,
-    transactionHistory: body.transaction_history || [],
-    language
-  });
+  // Validate and sanitize
+  const { data: validated, errors: validationErrors } = validate(parsed, ticket_id);
 
   const latencyMs = Date.now() - startMs;
   const safetyPassed = !validationErrors.some((e) =>
     e.includes('forbidden phrase') || e.includes('credential leak')
   );
 
+  // Async log to Supabase (non-blocking)
   logTicket({
     ticketId: ticket_id,
     provider,
@@ -189,28 +180,83 @@ app.post('/analyze-ticket', async (req, res) => {
     safetyPassed,
     confidence: validated.confidence,
     complaintHash: hashComplaint(complaint),
-    validationErrors: validationErrors.length > 0 ? validationErrors : null,
-    reasonCodes: validated.reason_codes,
-    matcherScore: matchResult.best?.score ?? null,
-    securityFlags: preFilterResult?.security_flag || null,
-    promptInjection: Boolean(preFilterResult?.flagged),
-    department: validated.department,
-    severity: validated.severity
+    validationErrors: validationErrors.length > 0 ? validationErrors : null
   }).catch(() => {});
 
-  console.log(
-    `[OK] ${ticket_id} | ${validated.case_type} | ${validated.evidence_verdict} | ${provider} | ${latencyMs}ms`
-  );
+  console.log(`[OK] ${ticket_id} | ${validated.case_type} | ${validated.evidence_verdict} | ${provider} | ${latencyMs}ms`);
+
+  return {
+    error: false,
+    status: 200,
+    data: {
+      ...validated,
+      _meta: { provider, masked_api_key: maskedApiKey }
+    }
+  };
+}
+
+// ── Main endpoint (single ticket) ─────────────────────────────
+app.post('/analyze-ticket', async (req, res) => {
+  const body = req.body;
+  if (!body || typeof body !== 'object') {
+    return res.status(400).json({ error: 'Invalid JSON body' });
+  }
+
+  const result = await analyzeOneTicket(body);
+  return res.status(result.status).json(result.data);
+});
+
+// ── Batch endpoint (multiple tickets) ─────────────────────────
+app.post('/analyze-batch', async (req, res) => {
+  const body = req.body;
+  if (!body || typeof body !== 'object') {
+    return res.status(400).json({ error: 'Invalid JSON body' });
+  }
+
+  // Accept either a raw array or an object with a "tickets" key
+  let tickets;
+  if (Array.isArray(body)) {
+    tickets = body;
+  } else if (Array.isArray(body.tickets)) {
+    tickets = body.tickets;
+  } else {
+    return res.status(400).json({
+      error: 'Batch payload must be a JSON array of tickets, or an object with a "tickets" array.'
+    });
+  }
+
+  if (tickets.length === 0) {
+    return res.status(400).json({ error: 'Tickets array is empty.' });
+  }
+
+  if (tickets.length > 20) {
+    return res.status(400).json({ error: 'Maximum 20 tickets per batch.' });
+  }
+
+  const results = [];
+  for (let i = 0; i < tickets.length; i++) {
+    const ticket = tickets[i];
+    console.log(`[Batch] Processing ticket ${i + 1}/${tickets.length}: ${ticket.ticket_id || '(no id)'}`);
+    const result = await analyzeOneTicket(ticket);
+    results.push({
+      index: i,
+      ticket_id: ticket.ticket_id || null,
+      success: !result.error,
+      status: result.status,
+      result: result.data
+    });
+  }
+
+  const successCount = results.filter(r => r.success).length;
+  const failCount = results.length - successCount;
+  console.log(`[Batch] Complete: ${successCount} succeeded, ${failCount} failed out of ${results.length}`);
 
   return res.status(200).json({
-    ...validated,
-    _meta: {
-      provider,
-      masked_api_key: maskedApiKey,
-      fallback_used: fallbackUsed,
-      latency_ms: latencyMs,
-      llm_latency_ms: llmLatencyMs
-    }
+    batch: true,
+    total: results.length,
+    succeeded: successCount,
+    failed: failCount,
+    results
   });
 });
 
