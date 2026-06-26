@@ -109,6 +109,11 @@ async function analyzeOneTicket(body) {
     console.warn(`[Security] Injection attempt detected in ticket ${ticket_id}`);
   }
 
+  // Deterministic Analysis
+  const matchResult = matchTransactions(complaint, body.transaction_history || []);
+  const evidenceResult = buildEvidence(matchResult, complaint, body.transaction_history || []);
+  const rulesResult = applyRules({ preFilterResult, matchResult, evidenceResult, complaint });
+
   // Build prompts
   const systemPrompt = buildSystemPrompt();
   const userPrompt = buildUserPrompt(body, {
@@ -126,7 +131,6 @@ async function analyzeOneTicket(body) {
   let llmLatencyMs = 0;
 
   // Call LLM with fallback
-  let raw, provider, maskedApiKey;
   try {
     const result = await callLLM(systemPrompt, userPrompt);
     raw = result.raw;
@@ -161,7 +165,13 @@ async function analyzeOneTicket(body) {
   }
 
   // Validate and sanitize
-  const { data: validated, errors: validationErrors } = validate(parsed, ticket_id);
+  const { data: validated, errors: validationErrors } = validate(parsed, ticket_id, {
+    language,
+    evidenceResult,
+    rulesResult,
+    preFilterResult,
+    transactionHistory: body.transaction_history || []
+  });
 
   const latencyMs = Date.now() - startMs;
   const safetyPassed = !validationErrors.some((e) =>
