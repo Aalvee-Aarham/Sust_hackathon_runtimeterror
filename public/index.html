@@ -354,11 +354,23 @@
   <div class="modal-overlay hidden" id="json-modal" role="dialog" aria-modal="true" aria-labelledby="json-modal-title">
     <div class="modal-card modal-card-wide">
       <div class="modal-header">
-        <h3 id="json-modal-title">Submit Custom JSON Payload</h3>
+        <h3 id="json-modal-title">Submit JSON Payload</h3>
         <button type="button" class="btn-close" id="btn-close-json-modal" aria-label="Close">&times;</button>
       </div>
+
+      <!-- Mode Toggle -->
+      <div class="json-mode-toggle" id="json-mode-toggle">
+        <button type="button" class="mode-btn mode-btn-active" id="mode-single" data-mode="single">
+          <span class="mode-icon">📄</span> Single Ticket
+        </button>
+        <button type="button" class="mode-btn" id="mode-batch" data-mode="batch">
+          <span class="mode-icon">📦</span> Batch (Multiple)
+        </button>
+      </div>
+
       <form id="json-form">
-        <div class="form-group">
+        <!-- Sample case select (single mode only) -->
+        <div class="form-group" id="json-sample-group">
           <label for="json-case-select">Load Sample Case</label>
           <select id="json-case-select">
             <option value="">— Select a sample case —</option>
@@ -374,18 +386,63 @@
             <option value="SAMPLE-10">SAMPLE-10 — Duplicate payment</option>
           </select>
         </div>
+
+        <!-- Batch sample loader (batch mode only) -->
+        <div class="form-group hidden" id="json-batch-sample-group">
+          <label>Quick Load Batch Samples</label>
+          <div class="batch-sample-actions">
+            <button type="button" class="btn-secondary btn-sm" id="btn-load-batch-3">Load 3 Samples</button>
+            <button type="button" class="btn-secondary btn-sm" id="btn-load-batch-5">Load 5 Samples</button>
+            <button type="button" class="btn-secondary btn-sm" id="btn-load-batch-all">Load All 10</button>
+          </div>
+        </div>
+
         <div class="form-group">
-          <label for="json-payload">Raw JSON (POST body for /analyze-ticket)</label>
+          <label for="json-payload" id="json-payload-label">Raw JSON (POST body for /analyze-ticket)</label>
+          <div class="json-format-hint hidden" id="json-batch-hint">
+            <span class="hint-icon">💡</span>
+            <span>Use an array of ticket objects: <code>[{...}, {...}]</code> or <code>{"tickets": [{...}, {...}]}</code></span>
+          </div>
           <textarea id="json-payload" class="json-textarea" rows="14" required placeholder='{"ticket_id": "TKT-001", "complaint": "..."}'></textarea>
           <p id="json-error" class="inline-error hidden" role="alert"></p>
         </div>
         <div class="modal-actions">
           <button type="button" class="btn-secondary" id="btn-cancel-json">Cancel</button>
-          <button type="submit" class="btn-primary" id="btn-json-submit">Analyze JSON</button>
+          <button type="submit" class="btn-primary" id="btn-json-submit">
+            <span id="btn-json-submit-text">Analyze JSON</span>
+            <span class="spinner hidden" id="btn-json-spinner"></span>
+          </button>
         </div>
       </form>
     </div>
   </div>
+
+  <!-- Batch Results Section -->
+  <section class="batch-results-section hidden" id="batch-results-section" aria-labelledby="batch-results-heading">
+    <div class="app-container">
+      <div class="card">
+        <div class="card-header batch-results-header">
+          <div>
+            <h2 id="batch-results-heading">📦 Batch Analysis Results</h2>
+            <p class="card-subtitle" id="batch-results-summary">Processing tickets…</p>
+          </div>
+          <div class="batch-header-actions">
+            <button type="button" class="btn-secondary btn-sm" id="btn-copy-batch-json">Copy All JSON</button>
+            <button type="button" class="btn-secondary btn-sm btn-danger-outline" id="btn-close-batch">Dismiss</button>
+          </div>
+        </div>
+
+        <!-- Batch progress bar -->
+        <div class="batch-progress" id="batch-progress">
+          <div class="batch-progress-bar" id="batch-progress-bar" style="width: 0%"></div>
+        </div>
+        <div class="batch-progress-label" id="batch-progress-label">0 / 0 tickets</div>
+
+        <!-- Individual result cards -->
+        <div class="batch-results-list" id="batch-results-list"></div>
+      </div>
+    </div>
+  </section>
 
   <footer class="app-footer">
     <p>&copy; 2026 QueueStorm. AI Support Investigator Internal Copilot.</p>

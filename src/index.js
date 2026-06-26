@@ -79,40 +79,30 @@ app.get('/api/agents', (req, res) => {
   res.json({ priority: PRIORITY, primary, agents });
 });
 
-// ── Main endpoint ─────────────────────────────────────────────
-app.post('/analyze-ticket', async (req, res) => {
+// ── Shared analysis logic ─────────────────────────────────────
+async function analyzeOneTicket(body) {
   const startMs = Date.now();
-
-  // 1. Input validation
-  const body = req.body;
-  if (!body || typeof body !== 'object') {
-    return res.status(400).json({ error: 'Invalid JSON body' });
-  }
-
   const { ticket_id, complaint } = body;
 
   if (!ticket_id || typeof ticket_id !== 'string' || ticket_id.trim() === '') {
-    return res.status(400).json({ error: 'Missing required field: ticket_id' });
+    return { error: true, status: 400, data: { error: 'Missing required field: ticket_id' } };
   }
 
   if (!complaint || typeof complaint !== 'string' || complaint.trim() === '') {
-    return res.status(422).json({ error: 'Missing or empty complaint field' });
+    return { error: true, status: 422, data: { error: 'Missing or empty complaint field', ticket_id } };
   }
 
-  // 2. Pre-filter
+  // Pre-filter
   const preFilterResult = preFilter(body);
-
-  // Log injection attempts separately (flagged=true)
   if (preFilterResult?.flagged) {
     console.warn(`[Security] Injection attempt detected in ticket ${ticket_id}`);
-    // Still process but LLM will ignore the instructions
   }
 
-  // 3. Build prompts
+  // Build prompts
   const systemPrompt = buildSystemPrompt();
   const userPrompt = buildUserPrompt(body, preFilterResult);
 
-  // 4. Call LLM with fallback
+  // Call LLM with fallback
   let raw, provider, maskedApiKey;
   try {
     const result = await callLLM(systemPrompt, userPrompt);
@@ -123,30 +113,35 @@ app.post('/analyze-ticket', async (req, res) => {
     console.error(`[LLM] All providers failed for ${ticket_id}:`, err.message);
     const detail = err.message || 'Unknown error';
     const isRateLimit = /429|rate.?limit|quota|RESOURCE_EXHAUSTED/i.test(detail);
-    return res.status(isRateLimit ? 429 : 503).json({
-      error: isRateLimit
-        ? 'LLM rate limit reached on all keys. Wait a minute or add Groq/OpenRouter keys in .env.'
-        : 'LLM service unavailable. Please retry.',
-      detail
-    });
+    return {
+      error: true,
+      status: isRateLimit ? 429 : 503,
+      data: {
+        error: isRateLimit
+          ? 'LLM rate limit reached on all keys. Wait a minute or add Groq/OpenRouter keys in .env.'
+          : 'LLM service unavailable. Please retry.',
+        detail,
+        ticket_id
+      }
+    };
   }
 
-  // 5. Parse JSON
+  // Parse JSON
   let parsed;
   try {
     parsed = parseJSON(raw);
   } catch (err) {
     console.error(`[Parse] JSON parse failed for ${ticket_id}:`, err.message, '\nRaw:', raw?.substring(0, 200));
-    return res.status(500).json({ error: 'Failed to parse LLM response. Please retry.' });
+    return { error: true, status: 500, data: { error: 'Failed to parse LLM response. Please retry.', ticket_id } };
   }
 
-  // 6. Validate and sanitize
+  // Validate and sanitize
   const { data: validated, errors: validationErrors } = validate(parsed, ticket_id);
 
   const latencyMs = Date.now() - startMs;
   const safetyPassed = validationErrors.filter(e => e.includes('forbidden phrase')).length === 0;
 
-  // 7. Async log to Supabase (non-blocking)
+  // Async log to Supabase (non-blocking)
   logTicket({
     ticketId: ticket_id,
     provider,
@@ -157,16 +152,82 @@ app.post('/analyze-ticket', async (req, res) => {
     confidence: validated.confidence,
     complaintHash: hashComplaint(complaint),
     validationErrors: validationErrors.length > 0 ? validationErrors : null
-  }).catch(() => {}); // truly non-blocking
+  }).catch(() => {});
 
   console.log(`[OK] ${ticket_id} | ${validated.case_type} | ${validated.evidence_verdict} | ${provider} | ${latencyMs}ms`);
 
-  return res.status(200).json({
-    ...validated,
-    _meta: {
-      provider,
-      masked_api_key: maskedApiKey
+  return {
+    error: false,
+    status: 200,
+    data: {
+      ...validated,
+      _meta: { provider, masked_api_key: maskedApiKey }
     }
+  };
+}
+
+// ── Main endpoint (single ticket) ─────────────────────────────
+app.post('/analyze-ticket', async (req, res) => {
+  const body = req.body;
+  if (!body || typeof body !== 'object') {
+    return res.status(400).json({ error: 'Invalid JSON body' });
+  }
+
+  const result = await analyzeOneTicket(body);
+  return res.status(result.status).json(result.data);
+});
+
+// ── Batch endpoint (multiple tickets) ─────────────────────────
+app.post('/analyze-batch', async (req, res) => {
+  const body = req.body;
+  if (!body || typeof body !== 'object') {
+    return res.status(400).json({ error: 'Invalid JSON body' });
+  }
+
+  // Accept either a raw array or an object with a "tickets" key
+  let tickets;
+  if (Array.isArray(body)) {
+    tickets = body;
+  } else if (Array.isArray(body.tickets)) {
+    tickets = body.tickets;
+  } else {
+    return res.status(400).json({
+      error: 'Batch payload must be a JSON array of tickets, or an object with a "tickets" array.'
+    });
+  }
+
+  if (tickets.length === 0) {
+    return res.status(400).json({ error: 'Tickets array is empty.' });
+  }
+
+  if (tickets.length > 20) {
+    return res.status(400).json({ error: 'Maximum 20 tickets per batch.' });
+  }
+
+  const results = [];
+  for (let i = 0; i < tickets.length; i++) {
+    const ticket = tickets[i];
+    console.log(`[Batch] Processing ticket ${i + 1}/${tickets.length}: ${ticket.ticket_id || '(no id)'}`);
+    const result = await analyzeOneTicket(ticket);
+    results.push({
+      index: i,
+      ticket_id: ticket.ticket_id || null,
+      success: !result.error,
+      status: result.status,
+      result: result.data
+    });
+  }
+
+  const successCount = results.filter(r => r.success).length;
+  const failCount = results.length - successCount;
+  console.log(`[Batch] Complete: ${successCount} succeeded, ${failCount} failed out of ${results.length}`);
+
+  return res.status(200).json({
+    batch: true,
+    total: results.length,
+    succeeded: successCount,
+    failed: failCount,
+    results
   });
 });
 
