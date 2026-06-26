@@ -7,6 +7,7 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 
 const { preFilter } = require('./preFilter');
+const { findBestTransaction } = require('./transactionMatcher');
 const { callLLM, maskApiKey, PRIORITY } = require('./llmCaller');
 const { geminiRotator, groqRotator, openrouterRotator } = require('./keyRotator');
 const { buildSystemPrompt, buildUserPrompt } = require('./prompt');
@@ -102,6 +103,11 @@ app.post('/analyze-ticket', async (req, res) => {
   // 2. Pre-filter
   const preFilterResult = preFilter(body);
 
+  const matchedTransaction = findBestTransaction(
+    body.transaction_history || [],
+    complaint
+  );
+
   // Log injection attempts separately (flagged=true)
   if (preFilterResult?.flagged) {
     console.warn(`[Security] Injection attempt detected in ticket ${ticket_id}`);
@@ -110,7 +116,12 @@ app.post('/analyze-ticket', async (req, res) => {
 
   // 3. Build prompts
   const systemPrompt = buildSystemPrompt();
-  const userPrompt = buildUserPrompt(body, preFilterResult);
+
+  const userPrompt = buildUserPrompt(
+    body,
+    preFilterResult,
+    matchedTransaction
+  );
 
   // 4. Call LLM with fallback
   let raw, provider, maskedApiKey;

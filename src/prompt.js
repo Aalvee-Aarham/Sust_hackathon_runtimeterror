@@ -66,27 +66,74 @@ OUTPUT: You MUST return ONLY a valid JSON object. No explanation, no markdown, n
 }`;
 }
 
-function buildUserPrompt(body, preFilterHint) {
+
+
+function buildUserPrompt(body, preFilterHint, matchedTransaction) {
+
   const hintText = preFilterHint
-    ? `\n\nPRE-FILTER HINT: ${JSON.stringify(preFilterHint)} (use as additional signal, not override)`
-    : '';
+    ? `
 
-  return `Analyze this support ticket:
+PRE-FILTER HINT:
+${JSON.stringify(preFilterHint, null, 2)}
 
-ticket_id: ${body.ticket_id}
-language: ${body.language || 'unknown'}
-channel: ${body.channel || 'unknown'}
-user_type: ${body.user_type || 'customer'}
-campaign_context: ${body.campaign_context || 'none'}
+Use this only as an additional signal.
+Do NOT let it override transaction evidence.
+`
+    : "";
 
-COMPLAINT:
+  const transactionHint = matchedTransaction
+    ? `
+
+MATCHED TRANSACTION (Rule Engine):
+${JSON.stringify(matchedTransaction, null, 2)}
+
+IMPORTANT:
+The above transaction was selected by the deterministic transaction matcher.
+Treat it as the PRIMARY candidate while investigating.
+Only reject it if the remaining transaction history clearly contradicts it.
+`
+    : "";
+
+  return `Analyze the following customer support ticket.
+
+Ticket ID:
+${body.ticket_id}
+
+Language:
+${body.language || "unknown"}
+
+Channel:
+${body.channel || "unknown"}
+
+User Type:
+${body.user_type || "customer"}
+
+Campaign:
+${body.campaign_context || "none"}
+
+========================
+CUSTOMER COMPLAINT
+========================
+
 ${body.complaint}
 
-TRANSACTION HISTORY:
+========================
+TRANSACTION HISTORY
+========================
+
 ${JSON.stringify(body.transaction_history || [], null, 2)}
+
+${transactionHint}
+
 ${hintText}
 
-Apply all 6 reasoning steps. Output only the JSON response object.`;
+Follow all reasoning steps from the system prompt.
+
+Return ONLY the JSON object.
+`;
 }
 
-module.exports = { buildSystemPrompt, buildUserPrompt };
+module.exports = {
+  buildSystemPrompt,
+  buildUserPrompt
+};
