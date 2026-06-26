@@ -4,6 +4,7 @@ require('dotenv').config();
 const express = require('express');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const path = require('path');
 
 const { preFilter } = require('./preFilter');
 const { callLLM } = require('./llmCaller');
@@ -15,8 +16,20 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ── Middleware ────────────────────────────────────────────────
-app.use(helmet());
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      connectSrc: ["'self'"],
+      imgSrc: ["'self'", "data:"]
+    }
+  }
+}));
 app.use(express.json({ limit: '1mb' }));
+app.use(express.static(path.join(__dirname, '../public')));
 
 const limiter = rateLimit({
   windowMs: 60 * 1000,

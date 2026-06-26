@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QueueStorm AI Support Investigator</title>
+  <meta name="description" content="AI Copilot for digital finance support team to analyze customer complaints and transaction histories.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="glow-bg"></div>
+  
+  <header class="app-header">
+    <div class="header-container">
+      <div class="logo-area">
+        <span class="logo-icon">⚡</span>
+        <div>
+          <h1>QueueStorm</h1>
+          <span class="subtitle">AI Support Investigator</span>
+        </div>
+      </div>
+      <div class="status-indicator">
+        <span class="status-dot" id="system-status-dot"></span>
+        <span class="status-text" id="system-status-text">Checking Backend Status...</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="app-container">
+    <!-- Preset section -->
+    <section class="presets-section" aria-labelledby="presets-heading">
+      <h2 id="presets-heading" class="sr-only">Test Scenarios</h2>
+      <div class="presets-container">
+        <span class="presets-label">Load Test Scenario:</span>
+        <div class="preset-buttons">
+          <button type="button" class="btn-preset" id="preset-wrong-transfer" onclick="loadPreset('wrong_transfer')">
+            Wrong Transfer <span class="badge badge-success-outline">Consistent</span>
+          </button>
+          <button type="button" class="btn-preset" id="preset-phishing" onclick="loadPreset('phishing')">
+            Phishing <span class="badge badge-error-outline">Critical</span>
+          </button>
+          <button type="button" class="btn-preset" id="preset-payment-failed" onclick="loadPreset('payment_failed')">
+            Payment Failed <span class="badge badge-warning-outline">Inconsistent</span>
+          </button>
+          <button type="button" class="btn-preset" id="preset-clear" onclick="clearAll()">Clear All</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="workspace-grid">
+      <!-- Input Panel -->
+      <section class="card input-panel" aria-labelledby="workspace-heading">
+        <div class="card-header">
+          <h2 id="workspace-heading">Ticket Workspace</h2>
+          <p class="card-subtitle">Provide details of the support ticket and transaction history.</p>
+        </div>
+
+        <form id="ticket-form" onsubmit="runAnalysis(event)">
+          <div class="form-row">
+            <div class="form-group flex-2">
+              <label for="ticket-id">Ticket ID</label>
+              <div class="input-with-action">
+                <input type="text" id="ticket-id" required placeholder="e.g. TKT-998124">
+                <button type="button" class="btn-secondary" id="btn-generate-id" onclick="generateTicketId()">Gen ID</button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="ticket-language">Language</label>
+              <select id="ticket-language">
+                <option value="en">English (en)</option>
+                <option value="bn">Bangla (bn)</option>
+                <option value="mixed">Banglish/Mixed</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label for="ticket-channel">Channel</label>
+              <select id="ticket-channel">
+                <option value="app">Mobile App</option>
+                <option value="email">Email</option>
+                <option value="live_chat">Live Chat</option>
+                <option value="ussd">USSD</option>
+                <option value="call_center">Call Center</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="ticket-user-type">User Type</label>
+              <select id="ticket-user-type">
+                <option value="customer">Customer</option>
+                <option value="merchant">Merchant</option>
+                <option value="agent">Agent</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="ticket-campaign">Campaign Context</label>
+              <input type="text" id="ticket-campaign" placeholder="none" value="none">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="ticket-complaint">Customer Complaint</label>
+            <textarea id="ticket-complaint" required placeholder="Paste the customer's explanation or complaint here..."></textarea>
+          </div>
+
+          <!-- Transactions section -->
+          <div class="transactions-section">
+            <div class="section-header">
+              <h3>Customer Transaction History</h3>
+              <button type="button" class="btn-secondary btn-sm" id="btn-add-txn" onclick="openTxnMoral()">+ Add Transaction</button>
+            </div>
+            
+            <div class="table-wrapper">
+              <table id="transactions-table">
+                <thead>
+                  <tr>
+                    <th>Txn ID</th>
+                    <th>Type</th>
+                    <th>Amount (BDT)</th>
+                    <th>Status</th>
+                    <th>Counterparty</th>
+                    <th>Timestamp</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="transactions-list">
+                  <!-- Dynamic rows go here -->
+                  <tr id="no-transactions-row">
+                    <td colspan="7" class="empty-state">No transaction history added yet. Click "+ Add Transaction" or load a preset.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <button type="submit" class="btn-primary btn-large btn-glow" id="btn-analyze">
+            <span id="btn-text">Investigate & Run Copilot</span>
+            <span class="spinner hidden" id="btn-spinner"></span>
+          </button>
+        </form>
+      </section>
+
+      <!-- Output Panel -->
+      <section class="card output-panel" aria-labelledby="results-heading">
+        <div class="card-header">
+          <h2 id="results-heading">AI Verdict & Action Center</h2>
+          <p class="card-subtitle">Real-time analysis, routing classification, and response validation.</p>
+        </div>
+
+        <div id="results-placeholder" class="results-placeholder">
+          <div class="placeholder-content">
+            <div class="placeholder-icon">🔮</div>
+            <h3>Awaiting Investigation</h3>
+            <p>Fill out the ticket workspace on the left and run analysis to generate the investigator verdict.</p>
+          </div>
+        </div>
+
+        <div id="results-content" class="results-content hidden">
+          <!-- Evidence Verdict Banner -->
+          <div class="verdict-banner" id="verdict-banner-container">
+            <div class="verdict-info">
+              <span class="verdict-label">Evidence Verdict</span>
+              <h3 id="result-evidence-verdict">CONSISTENT</h3>
+            </div>
+            <div class="verdict-badge-wrapper">
+              <span class="badge-large" id="result-badge">Consistent</span>
+            </div>
+          </div>
+
+          <!-- Meta Grid -->
+          <div class="meta-grid">
+            <div class="meta-card">
+              <span class="meta-label">Case Classification</span>
+              <div class="meta-value" id="result-case-type">Wrong Transfer</div>
+            </div>
+            <div class="meta-card">
+              <span class="meta-label">Severity Level</span>
+              <div class="meta-value" id="result-severity">High</div>
+            </div>
+            <div class="meta-card">
+              <span class="meta-label">Routed Department</span>
+              <div class="meta-value" id="result-department">Dispute Resolution</div>
+            </div>
+            <div class="meta-card">
+              <span class="meta-label">Confidence Score</span>
+              <div class="confidence-container">
+                <div class="confidence-bar-outer">
+                  <div class="confidence-bar-inner" id="result-confidence-bar" style="width: 85%;"></div>
+                </div>
+                <span class="confidence-percent" id="result-confidence-value">85%</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Human Review Required Banner -->
+          <div class="alert-box" id="result-human-review-box">
+            <div class="alert-icon">⚠️</div>
+            <div class="alert-content">
+              <strong>Human Review Required:</strong>
+              <span id="result-human-review-text">Yes, high severity and wrong transfer requires agent oversight.</span>
+            </div>
+          </div>
+
+          <!-- Reason Codes -->
+          <div class="details-group">
+            <h4>Reason Identifiers</h4>
+            <div class="reason-chips" id="result-reason-codes">
+              <!-- Dynamic chips -->
+            </div>
+          </div>
+
+          <!-- Internal Agent Summary -->
+          <div class="details-group">
+            <h4>Internal Copilot Summary</h4>
+            <div class="summary-box" id="result-agent-summary">
+              Customer claims wrong transfer. The transaction was found, but it has been sent to this number 4 times in the past month.
+            </div>
+          </div>
+
+          <!-- Next Action -->
+          <div class="details-group">
+            <h4>Recommended Next Action</h4>
+            <div class="action-box">
+              <div class="action-icon">🎯</div>
+              <p id="result-next-action">Escalate to dispute resolution to verify matching number claims.</p>
+            </div>
+          </div>
+
+          <!-- Customer Reply Response -->
+          <div class="details-group reply-group">
+            <div class="reply-header">
+              <h4>Customer Response (Auto-Sanitized)</h4>
+              <button type="button" class="btn-secondary btn-sm" onclick="copyCustomerReply()">Copy Text</button>
+            </div>
+            <textarea class="reply-textarea" id="result-customer-reply" readonly></textarea>
+            <div class="reply-footer-hint">
+              <span class="shield-icon">🛡️</span> Credential safety override applied automatically. No credentials are requested.
+            </div>
+          </div>
+
+          <!-- Validation Errors Drawer -->
+          <div class="validation-errors-drawer" id="validation-drawer">
+            <button type="button" class="drawer-trigger" onclick="toggleDrawer()">
+              <span>Safety & Policy Audits</span>
+              <span id="drawer-icon">▼</span>
+            </button>
+            <div class="drawer-content hidden" id="drawer-content">
+              <ul class="audit-list" id="audit-list-items">
+                <!-- Log checks -->
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <!-- Add Transaction Modal -->
+  <div class="modal-overlay hidden" id="txn-modal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>Add Customer Transaction</h3>
+        <button type="button" class="btn-close" onclick="closeTxnMoral()">&times;</button>
+      </div>
+      <form id="txn-form" onsubmit="addTransaction(event)">
+        <div class="form-group">
+          <label for="txn-id">Transaction ID</label>
+          <div class="input-with-action">
+            <input type="text" id="txn-id" required placeholder="e.g. TXN100234">
+            <button type="button" class="btn-secondary" onclick="generateTxnId()">Gen ID</button>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="txn-type">Type</label>
+            <select id="txn-type">
+              <option value="transfer">Transfer</option>
+              <option value="payment">Payment</option>
+              <option value="cash_in">Cash In</option>
+              <option value="cash_out">Cash Out</option>
+              <option value="reissue">Reissue</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="txn-amount">Amount (BDT)</label>
+            <input type="number" id="txn-amount" required min="1" step="any" placeholder="e.g. 5000">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="txn-status">Status</label>
+            <select id="txn-status">
+              <option value="completed">Completed</option>
+              <option value="failed">Failed</option>
+              <option value="pending">Pending</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="txn-counterparty">Counterparty Account / Merchant</label>
+            <input type="text" id="txn-counterparty" required placeholder="e.g. 017XXXXXXXX or Merchant Name">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="txn-timestamp">Timestamp</label>
+          <input type="datetime-local" id="txn-timestamp" required>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" class="btn-secondary" onclick="closeTxnMoral()">Cancel</button>
+          <button type="submit" class="btn-primary">Add Transaction</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <footer class="app-footer">
+    <p>&copy; 2026 QueueStorm. AI Support Investigator Internal Copilot.</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
