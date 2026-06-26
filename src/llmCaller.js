@@ -7,87 +7,128 @@ const { geminiRotator, groqRotator, openrouterRotator } = require('./keyRotator'
 const TIMEOUT = parseInt(process.env.LLM_TIMEOUT_MS || '25000');
 const PRIORITY = (process.env.LLM_PRIORITY || 'gemini,groq,openrouter').split(',').map(s => s.trim());
 
-async function callGemini(systemPrompt, userPrompt) {
-  const key = geminiRotator.next();
-  if (!key) throw new Error('No Gemini keys configured');
+function maskApiKey(key) {
+  if (!key || typeof key !== 'string') return 'N/A';
+  if (key.length <= 4) return '****';
+  return `${key.slice(0, 4)}••••••••`;
+}
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`;
-  const body = {
-    contents: [
-      {
-        parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }]
+function getErrorMessage(err) {
+  const status = err.response?.status;
+  const apiMsg = err.response?.data?.error?.message
+    || err.response?.data?.error?.status
+    || err.response?.data?.message;
+  if (status && apiMsg) return `HTTP ${status}: ${apiMsg}`;
+  if (status) return `HTTP ${status}`;
+  return err.message;
+}
+
+function isRetryableStatus(status) {
+  return [401, 403, 429, 402, 503, 500].includes(status);
+}
+
+async function callWithKeyRotation(rotator, providerName, callFn) {
+  if (!rotator.hasKeys()) {
+    throw new Error(`No ${providerName} keys configured (check .env)`);
+  }
+
+  const errors = [];
+  const maxAttempts = rotator.count;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const key = rotator.next();
+    try {
+      const raw = await callFn(key);
+      return { raw, masked_api_key: maskApiKey(key) };
+    } catch (err) {
+      const status = err.response?.status;
+      const msg = getErrorMessage(err);
+      errors.push(`${maskApiKey(key)} → ${msg}`);
+
+      if (isRetryableStatus(status) && attempt < maxAttempts - 1) {
+        console.warn(`[LLM] ${providerName} key ${maskApiKey(key)} failed (${msg}), trying next key…`);
+        continue;
       }
-    ],
-    generationConfig: {
-      temperature: 0.1,
-      maxOutputTokens: 1200,
-      responseMimeType: 'application/json'
+      break;
     }
-  };
+  }
 
-  const res = await axios.post(url, body, { timeout: TIMEOUT });
-  const raw = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!raw) throw new Error('Gemini returned empty response');
-  return raw;
+  throw new Error(`${providerName} failed (${maxAttempts} key(s)): ${errors.join(' | ')}`);
+}
+
+async function callGemini(systemPrompt, userPrompt) {
+  return callWithKeyRotation(geminiRotator, 'gemini', async (key) => {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`;
+    const res = await axios.post(url, {
+      contents: [{ parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }],
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: 1200,
+        responseMimeType: 'application/json'
+      }
+    }, { timeout: TIMEOUT });
+
+    const raw = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!raw) throw new Error('Gemini returned empty response');
+    return raw;
+  });
 }
 
 async function callGroq(systemPrompt, userPrompt) {
-  const key = groqRotator.next();
-  if (!key) throw new Error('No Groq keys configured');
+  return callWithKeyRotation(groqRotator, 'groq', async (key) => {
+    const res = await axios.post(
+      'https://api.groq.com/openai/v1/chat/completions',
+      {
+        model: 'llama-3.3-70b-versatile',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ],
+        temperature: 0.1,
+        max_tokens: 1200,
+        response_format: { type: 'json_object' }
+      },
+      {
+        timeout: TIMEOUT,
+        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }
+      }
+    );
 
-  const res = await axios.post(
-    'https://api.groq.com/openai/v1/chat/completions',
-    {
-      model: 'llama-3.3-70b-versatile',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
-      ],
-      temperature: 0.1,
-      max_tokens: 1200,
-      response_format: { type: 'json_object' }
-    },
-    {
-      timeout: TIMEOUT,
-      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }
-    }
-  );
-
-  const raw = res.data?.choices?.[0]?.message?.content;
-  if (!raw) throw new Error('Groq returned empty response');
-  return raw;
+    const raw = res.data?.choices?.[0]?.message?.content;
+    if (!raw) throw new Error('Groq returned empty response');
+    return raw;
+  });
 }
 
 async function callOpenRouter(systemPrompt, userPrompt) {
-  const key = openrouterRotator.next();
-  if (!key) throw new Error('No OpenRouter keys configured');
-
-  const res = await axios.post(
-    'https://openrouter.ai/api/v1/chat/completions',
-    {
-      model: 'google/gemini-2.0-flash-001',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
-      ],
-      temperature: 0.1,
-      max_tokens: 1200,
-      response_format: { type: 'json_object' }
-    },
-    {
-      timeout: TIMEOUT,
-      headers: {
-        Authorization: `Bearer ${key}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://queuestorm.local',
-        'X-Title': 'QueueStorm Investigator'
+  return callWithKeyRotation(openrouterRotator, 'openrouter', async (key) => {
+    const res = await axios.post(
+      'https://openrouter.ai/api/v1/chat/completions',
+      {
+        model: 'google/gemini-2.0-flash-001',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ],
+        temperature: 0.1,
+        max_tokens: 1200,
+        response_format: { type: 'json_object' }
+      },
+      {
+        timeout: TIMEOUT,
+        headers: {
+          Authorization: `Bearer ${key}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://queuestorm.local',
+          'X-Title': 'QueueStorm Investigator'
+        }
       }
-    }
-  );
+    );
 
-  const raw = res.data?.choices?.[0]?.message?.content;
-  if (!raw) throw new Error('OpenRouter returned empty response');
-  return raw;
+    const raw = res.data?.choices?.[0]?.message?.content;
+    if (!raw) throw new Error('OpenRouter returned empty response');
+    return raw;
+  });
 }
 
 const CALLERS = {
@@ -102,14 +143,14 @@ async function callLLM(systemPrompt, userPrompt) {
     const fn = CALLERS[provider];
     if (!fn) continue;
     try {
-      const raw = await fn(systemPrompt, userPrompt);
-      return { raw, provider };
+      const { raw, masked_api_key } = await fn(systemPrompt, userPrompt);
+      return { raw, provider, masked_api_key };
     } catch (err) {
       errors.push(`${provider}: ${err.message}`);
-      // try next provider
+      console.warn(`[LLM] Provider ${provider} failed, trying next…`, err.message);
     }
   }
-  throw new Error(`All LLM providers failed: ${errors.join(' | ')}`);
+  throw new Error(`All LLM providers failed → ${errors.join(' | ')}`);
 }
 
-module.exports = { callLLM };
+module.exports = { callLLM, maskApiKey, PRIORITY };

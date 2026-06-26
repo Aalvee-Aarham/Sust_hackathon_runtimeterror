@@ -7,7 +7,8 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 
 const { preFilter } = require('./preFilter');
-const { callLLM } = require('./llmCaller');
+const { callLLM, maskApiKey, PRIORITY } = require('./llmCaller');
+const { geminiRotator, groqRotator, openrouterRotator } = require('./keyRotator');
 const { buildSystemPrompt, buildUserPrompt } = require('./prompt');
 const { parseJSON, validate } = require('./validator');
 const { logTicket, hashComplaint } = require('./logger');
@@ -45,6 +46,39 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+const ROTATORS = { gemini: geminiRotator, groq: groqRotator, openrouter: openrouterRotator };
+
+app.get('/api-key', (req, res) => {
+  for (const provider of PRIORITY) {
+    const rotator = ROTATORS[provider];
+    if (rotator?.hasKeys()) {
+      const key = rotator.keys[rotator.index % rotator.keys.length];
+      return res.json({
+        provider,
+        masked_api_key: maskApiKey(key),
+        priority: PRIORITY
+      });
+    }
+  }
+  res.json({ provider: 'none', masked_api_key: 'N/A', priority: PRIORITY });
+});
+
+app.get('/api/agents', (req, res) => {
+  const agents = PRIORITY.map((provider, index) => {
+    const rotator = ROTATORS[provider];
+    const configured = Boolean(rotator?.hasKeys());
+    return {
+      provider,
+      priority: index + 1,
+      configured,
+      masked_api_key: configured ? maskApiKey(rotator.keys[0]) : null,
+      status: configured ? 'ready' : 'not_configured'
+    };
+  });
+  const primary = agents.find((a) => a.configured) || null;
+  res.json({ priority: PRIORITY, primary, agents });
+});
+
 // ── Main endpoint ─────────────────────────────────────────────
 app.post('/analyze-ticket', async (req, res) => {
   const startMs = Date.now();
@@ -79,14 +113,22 @@ app.post('/analyze-ticket', async (req, res) => {
   const userPrompt = buildUserPrompt(body, preFilterResult);
 
   // 4. Call LLM with fallback
-  let raw, provider;
+  let raw, provider, maskedApiKey;
   try {
     const result = await callLLM(systemPrompt, userPrompt);
     raw = result.raw;
     provider = result.provider;
+    maskedApiKey = result.masked_api_key;
   } catch (err) {
     console.error(`[LLM] All providers failed for ${ticket_id}:`, err.message);
-    return res.status(500).json({ error: 'LLM service unavailable. Please retry.' });
+    const detail = err.message || 'Unknown error';
+    const isRateLimit = /429|rate.?limit|quota|RESOURCE_EXHAUSTED/i.test(detail);
+    return res.status(isRateLimit ? 429 : 503).json({
+      error: isRateLimit
+        ? 'LLM rate limit reached on all keys. Wait a minute or add Groq/OpenRouter keys in .env.'
+        : 'LLM service unavailable. Please retry.',
+      detail
+    });
   }
 
   // 5. Parse JSON
@@ -119,7 +161,13 @@ app.post('/analyze-ticket', async (req, res) => {
 
   console.log(`[OK] ${ticket_id} | ${validated.case_type} | ${validated.evidence_verdict} | ${provider} | ${latencyMs}ms`);
 
-  return res.status(200).json(validated);
+  return res.status(200).json({
+    ...validated,
+    _meta: {
+      provider,
+      masked_api_key: maskedApiKey
+    }
+  });
 });
 
 // ── 404 handler ───────────────────────────────────────────────

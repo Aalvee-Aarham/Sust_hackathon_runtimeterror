@@ -12,6 +12,18 @@
 </head>
 <body>
   <div class="glow-bg"></div>
+
+  <!-- Toast notifications -->
+  <div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="true"></div>
+
+  <!-- Full-screen loading overlay -->
+  <div id="loading-overlay" class="loading-overlay" aria-live="polite" aria-busy="false" aria-hidden="true">
+    <div class="loading-overlay-content">
+      <div class="loading-spinner"></div>
+      <p id="loading-overlay-text">Processing request…</p>
+      <p id="loading-overlay-subtext" class="loading-subtext">Connecting to backend…</p>
+    </div>
+  </div>
   
   <header class="app-header">
     <div class="header-container">
@@ -22,49 +34,56 @@
           <span class="subtitle">AI Support Investigator</span>
         </div>
       </div>
-      <div class="status-indicator">
-        <span class="status-dot" id="system-status-dot"></span>
-        <span class="status-text" id="system-status-text">Checking Backend Status...</span>
+      <div class="header-right">
+        <div class="status-indicator">
+          <span class="status-dot" id="system-status-dot"></span>
+          <span class="status-text" id="system-status-text">Checking Backend Status...</span>
+        </div>
+      </div>
+    </div>
+    <!-- LLM Agent status bar -->
+    <div class="agent-bar" id="agent-bar">
+      <span class="agent-bar-label">LLM Agents:</span>
+      <div class="agent-chips" id="agent-chips">
+        <span class="agent-chip agent-chip-loading">Loading agents…</span>
       </div>
     </div>
   </header>
 
   <main class="app-container">
-    <!-- Preset section -->
     <section class="presets-section" aria-labelledby="presets-heading">
       <h2 id="presets-heading" class="sr-only">Test Scenarios</h2>
       <div class="presets-container">
         <span class="presets-label">Load Test Scenario:</span>
         <div class="preset-buttons">
-          <button type="button" class="btn-preset" id="preset-wrong-transfer" onclick="loadPreset('wrong_transfer')">
+          <button type="button" class="btn-preset" id="preset-wrong-transfer" data-preset="wrong_transfer">
             Wrong Transfer <span class="badge badge-success-outline">Consistent</span>
           </button>
-          <button type="button" class="btn-preset" id="preset-phishing" onclick="loadPreset('phishing')">
+          <button type="button" class="btn-preset" id="preset-phishing" data-preset="phishing">
             Phishing <span class="badge badge-error-outline">Critical</span>
           </button>
-          <button type="button" class="btn-preset" id="preset-payment-failed" onclick="loadPreset('payment_failed')">
+          <button type="button" class="btn-preset" id="preset-payment-failed" data-preset="payment_failed">
             Payment Failed <span class="badge badge-warning-outline">Inconsistent</span>
           </button>
-          <button type="button" class="btn-preset" id="preset-clear" onclick="clearAll()">Clear All</button>
+          <button type="button" class="btn-preset" id="preset-clear">Clear All</button>
         </div>
       </div>
     </section>
 
     <div class="workspace-grid">
-      <!-- Input Panel -->
       <section class="card input-panel" aria-labelledby="workspace-heading">
         <div class="card-header">
           <h2 id="workspace-heading">Ticket Workspace</h2>
           <p class="card-subtitle">Provide details of the support ticket and transaction history.</p>
         </div>
 
-        <form id="ticket-form" onsubmit="runAnalysis(event)">
+        <form id="ticket-form">
           <div class="form-row">
             <div class="form-group flex-2">
               <label for="ticket-id">Ticket ID</label>
               <div class="input-with-action">
                 <input type="text" id="ticket-id" required placeholder="e.g. TKT-998124">
-                <button type="button" class="btn-secondary" id="btn-generate-id" onclick="generateTicketId()">Gen ID</button>
+                <button type="button" class="btn-secondary" id="btn-generate-id">Gen ID</button>
               </div>
             </div>
             <div class="form-group">
@@ -81,11 +100,11 @@
             <div class="form-group">
               <label for="ticket-channel">Channel</label>
               <select id="ticket-channel">
-                <option value="app">Mobile App</option>
+                <option value="in_app_chat">In-App Chat</option>
                 <option value="email">Email</option>
-                <option value="live_chat">Live Chat</option>
-                <option value="ussd">USSD</option>
                 <option value="call_center">Call Center</option>
+                <option value="merchant_portal">Merchant Portal</option>
+                <option value="field_agent">Field Agent</option>
               </select>
             </div>
             <div class="form-group">
@@ -107,11 +126,13 @@
             <textarea id="ticket-complaint" required placeholder="Paste the customer's explanation or complaint here..."></textarea>
           </div>
 
-          <!-- Transactions section -->
           <div class="transactions-section">
             <div class="section-header">
               <h3>Customer Transaction History</h3>
-              <button type="button" class="btn-secondary btn-sm" id="btn-add-txn" onclick="openTxnMoral()">+ Add Transaction</button>
+              <div class="section-actions">
+                <button type="button" class="btn-secondary btn-sm" id="btn-add-txn">+ Add Transaction</button>
+                <button type="button" class="btn-secondary btn-sm" id="btn-add-json">+ Submit JSON</button>
+              </div>
             </div>
             
             <div class="table-wrapper">
@@ -128,7 +149,6 @@
                   </tr>
                 </thead>
                 <tbody id="transactions-list">
-                  <!-- Dynamic rows go here -->
                   <tr id="no-transactions-row">
                     <td colspan="7" class="empty-state">No transaction history added yet. Click "+ Add Transaction" or load a preset.</td>
                   </tr>
@@ -144,7 +164,6 @@
         </form>
       </section>
 
-      <!-- Output Panel -->
       <section class="card output-panel" aria-labelledby="results-heading">
         <div class="card-header">
           <h2 id="results-heading">AI Verdict & Action Center</h2>
@@ -160,7 +179,6 @@
         </div>
 
         <div id="results-content" class="results-content hidden">
-          <!-- Evidence Verdict Banner -->
           <div class="verdict-banner" id="verdict-banner-container">
             <div class="verdict-info">
               <span class="verdict-label">Evidence Verdict</span>
@@ -171,7 +189,6 @@
             </div>
           </div>
 
-          <!-- Meta Grid -->
           <div class="meta-grid">
             <div class="meta-card">
               <span class="meta-label">Case Classification</span>
@@ -196,7 +213,6 @@
             </div>
           </div>
 
-          <!-- Human Review Required Banner -->
           <div class="alert-box" id="result-human-review-box">
             <div class="alert-icon">⚠️</div>
             <div class="alert-content">
@@ -205,53 +221,65 @@
             </div>
           </div>
 
-          <!-- Reason Codes -->
           <div class="details-group">
             <h4>Reason Identifiers</h4>
-            <div class="reason-chips" id="result-reason-codes">
-              <!-- Dynamic chips -->
-            </div>
+            <div class="reason-chips" id="result-reason-codes"></div>
           </div>
 
-          <!-- Internal Agent Summary -->
           <div class="details-group">
             <h4>Internal Copilot Summary</h4>
-            <div class="summary-box" id="result-agent-summary">
-              Customer claims wrong transfer. The transaction was found, but it has been sent to this number 4 times in the past month.
-            </div>
+            <div class="summary-box" id="result-agent-summary"></div>
           </div>
 
-          <!-- Next Action -->
           <div class="details-group">
             <h4>Recommended Next Action</h4>
             <div class="action-box">
               <div class="action-icon">🎯</div>
-              <p id="result-next-action">Escalate to dispute resolution to verify matching number claims.</p>
+              <p id="result-next-action"></p>
             </div>
           </div>
 
-          <!-- Customer Reply Response -->
           <div class="details-group reply-group">
             <div class="reply-header">
               <h4>Customer Response (Auto-Sanitized)</h4>
-              <button type="button" class="btn-secondary btn-sm" onclick="copyCustomerReply()">Copy Text</button>
+              <button type="button" class="btn-secondary btn-sm" id="btn-copy-reply">Copy Text</button>
             </div>
             <textarea class="reply-textarea" id="result-customer-reply" readonly></textarea>
             <div class="reply-footer-hint">
-              <span class="shield-icon">🛡️</span> Credential safety override applied automatically. No credentials are requested.
+              <span class="shield-icon">🛡️</span> Credential safety override applied automatically.
             </div>
           </div>
 
-          <!-- Validation Errors Drawer -->
+          <div class="service-info-panel" id="service-info-panel">
+            <h4>Backend Service Used</h4>
+            <div class="service-info-grid">
+              <div class="service-info-item">
+                <span class="service-info-label">LLM Provider</span>
+                <span class="service-info-value" id="api-provider-display">—</span>
+              </div>
+              <div class="service-info-item">
+                <span class="service-info-label">API Key (masked)</span>
+                <span class="service-info-value mono" id="api-key-display">—</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Raw JSON output -->
+          <div class="details-group json-output-group">
+            <div class="reply-header">
+              <h4>Raw JSON Response</h4>
+              <button type="button" class="btn-secondary btn-sm" id="btn-copy-json">Copy JSON</button>
+            </div>
+            <textarea class="json-output-textarea" id="result-json-output" readonly></textarea>
+          </div>
+
           <div class="validation-errors-drawer" id="validation-drawer">
-            <button type="button" class="drawer-trigger" onclick="toggleDrawer()">
+            <button type="button" class="drawer-trigger" id="drawer-trigger">
               <span>Safety & Policy Audits</span>
               <span id="drawer-icon">▼</span>
             </button>
             <div class="drawer-content hidden" id="drawer-content">
-              <ul class="audit-list" id="audit-list-items">
-                <!-- Log checks -->
-              </ul>
+              <ul class="audit-list" id="audit-list-items"></ul>
             </div>
           </div>
         </div>
@@ -260,18 +288,18 @@
   </main>
 
   <!-- Add Transaction Modal -->
-  <div class="modal-overlay hidden" id="txn-modal">
+  <div class="modal-overlay hidden" id="txn-modal" role="dialog" aria-modal="true" aria-labelledby="txn-modal-title">
     <div class="modal-card">
       <div class="modal-header">
-        <h3>Add Customer Transaction</h3>
-        <button type="button" class="btn-close" onclick="closeTxnMoral()">&times;</button>
+        <h3 id="txn-modal-title">Add Customer Transaction</h3>
+        <button type="button" class="btn-close" id="btn-close-txn-modal" aria-label="Close">&times;</button>
       </div>
-      <form id="txn-form" onsubmit="addTransaction(event)">
+      <form id="txn-form">
         <div class="form-group">
           <label for="txn-id">Transaction ID</label>
           <div class="input-with-action">
-            <input type="text" id="txn-id" required placeholder="e.g. TXN100234">
-            <button type="button" class="btn-secondary" onclick="generateTxnId()">Gen ID</button>
+            <input type="text" id="txn-id" required placeholder="e.g. TXN-100234">
+            <button type="button" class="btn-secondary" id="btn-generate-txn-id">Gen ID</button>
           </div>
         </div>
 
@@ -283,7 +311,8 @@
               <option value="payment">Payment</option>
               <option value="cash_in">Cash In</option>
               <option value="cash_out">Cash Out</option>
-              <option value="reissue">Reissue</option>
+              <option value="settlement">Settlement</option>
+              <option value="refund">Refund</option>
             </select>
           </div>
           <div class="form-group">
@@ -299,6 +328,7 @@
               <option value="completed">Completed</option>
               <option value="failed">Failed</option>
               <option value="pending">Pending</option>
+              <option value="reversed">Reversed</option>
             </select>
           </div>
           <div class="form-group">
@@ -313,8 +343,45 @@
         </div>
 
         <div class="modal-actions">
-          <button type="button" class="btn-secondary" onclick="closeTxnMoral()">Cancel</button>
+          <button type="button" class="btn-secondary" id="btn-cancel-txn">Cancel</button>
           <button type="submit" class="btn-primary">Add Transaction</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Submit JSON Payload Modal -->
+  <div class="modal-overlay hidden" id="json-modal" role="dialog" aria-modal="true" aria-labelledby="json-modal-title">
+    <div class="modal-card modal-card-wide">
+      <div class="modal-header">
+        <h3 id="json-modal-title">Submit Custom JSON Payload</h3>
+        <button type="button" class="btn-close" id="btn-close-json-modal" aria-label="Close">&times;</button>
+      </div>
+      <form id="json-form">
+        <div class="form-group">
+          <label for="json-case-select">Load Sample Case</label>
+          <select id="json-case-select">
+            <option value="">— Select a sample case —</option>
+            <option value="SAMPLE-01">SAMPLE-01 — Wrong transfer (consistent)</option>
+            <option value="SAMPLE-02">SAMPLE-02 — Wrong transfer (inconsistent)</option>
+            <option value="SAMPLE-03">SAMPLE-03 — Failed payment</option>
+            <option value="SAMPLE-04">SAMPLE-04 — Refund request</option>
+            <option value="SAMPLE-05">SAMPLE-05 — Phishing report</option>
+            <option value="SAMPLE-06">SAMPLE-06 — Vague complaint</option>
+            <option value="SAMPLE-07">SAMPLE-07 — Agent cash-in (Bangla)</option>
+            <option value="SAMPLE-08">SAMPLE-08 — Ambiguous match</option>
+            <option value="SAMPLE-09">SAMPLE-09 — Merchant settlement delay</option>
+            <option value="SAMPLE-10">SAMPLE-10 — Duplicate payment</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="json-payload">Raw JSON (POST body for /analyze-ticket)</label>
+          <textarea id="json-payload" class="json-textarea" rows="14" required placeholder='{"ticket_id": "TKT-001", "complaint": "..."}'></textarea>
+          <p id="json-error" class="inline-error hidden" role="alert"></p>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn-secondary" id="btn-cancel-json">Cancel</button>
+          <button type="submit" class="btn-primary" id="btn-json-submit">Analyze JSON</button>
         </div>
       </form>
     </div>
@@ -324,6 +391,6 @@
     <p>&copy; 2026 QueueStorm. AI Support Investigator Internal Copilot.</p>
   </footer>
 
-  <script src="app.js"></script>
+  <script src="app.js" defer></script>
 </body>
 </html>
